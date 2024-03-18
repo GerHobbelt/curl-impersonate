@@ -1,3 +1,37 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 49a44eabf..fe8b38915 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -550,6 +550,29 @@ if(CURL_ZSTD)
+   endif()
+ endif()
+ 
++option(USE_ECH "Enable ECH support" OFF)
++if(USE_ECH)
++  if(USE_OPENSSL OR USE_WOLFSSL)
++    # Be sure that the OpenSSL/wolfSSL library actually supports ECH.
++    if(NOT DEFINED HAVE_ECH)
++      if(USE_OPENSSL AND HAVE_BORINGSSL)
++        openssl_check_symbol_exists(SSL_set1_ech_config_list "openssl/ssl.h" HAVE_ECH)
++      elseif(USE_OPENSSL)
++        openssl_check_symbol_exists(SSL_ech_set1_echconfig "openssl/ech.h" HAVE_ECH)
++      elseif(USE_WOLFSSL)
++        openssl_check_symbol_exists(wolfSSL_CTX_GenerateEchConfig "wolfssl/options.h;wolfssl/ssl.h" HAVE_ECH)
++      endif()
++    endif()
++    if(NOT HAVE_ECH)
++      message(FATAL_ERROR "ECH support missing in OpenSSL/BoringSSL/wolfSSL")
++    else()
++      message("ECH enabled.")
++    endif()
++  else()
++    message(FATAL_ERROR "ECH requires ECH-enablded OpenSSL, BoringSSL or wolfSSL")
++  endif()
++endif()
++
+ option(USE_NGHTTP2 "Use Nghttp2 library" OFF)
+ if(USE_NGHTTP2)
+   find_package(NGHTTP2 REQUIRED)
 diff --git a/Makefile.am b/Makefile.am
 index f25e4e2f0..ff0c5630b 100644
 --- a/Makefile.am
@@ -19,7 +53,7 @@ index f25e4e2f0..ff0c5630b 100644
  # List of files required to generate VC IDE .dsp, .vcproj and .vcxproj files
  include lib/Makefile.inc
 diff --git a/configure.ac b/configure.ac
-index 75a882b12..71fd3290a 100644
+index 75a882b12..8697a6f74 100644
 --- a/configure.ac
 +++ b/configure.ac
 @@ -1493,7 +1493,8 @@ if test X"$OPT_BROTLI" != Xno; then
@@ -45,7 +79,36 @@ index 75a882b12..71fd3290a 100644
  
    AC_CHECK_HEADERS(brotli/decode.h,
      curl_brotli_msg="enabled (libbrotlidec)"
-@@ -4706,8 +4711,8 @@ AC_CONFIG_FILES([Makefile \
+@@ -4306,14 +4311,23 @@ if test "x$want_ech" != "xno"; then
+   ECH_ENABLED=0
+   ECH_SUPPORT=''
+ 
+-  dnl OpenSSL with a chosen ECH function should be enough
+-  dnl so more exhaustive checking seems unnecessary for now
++  dnl check for OpenSSL
++  if test "x$OPENSSL_ENABLED" = "x1"; then
++    AC_CHECK_FUNCS(SSL_ech_set1_echconfig,
++      ECH_SUPPORT="ECH support available via OpenSSL with SSL_ech_set1_echconfig"
++      ECH_ENABLED=1)
++  fi
++  dnl check for boringssl equivalent
+   if test "x$OPENSSL_ENABLED" = "x1"; then
+-    AC_CHECK_FUNCS(SSL_get_ech_status,
+-      ECH_SUPPORT="ECH support available (OpenSSL with SSL_get_ech_status)"
++    AC_CHECK_FUNCS(SSL_set1_ech_config_list,
++      ECH_SUPPORT="ECH support available via boringssl with SSL_set1_ech_config_list"
++      ECH_ENABLED=1)
++  fi
++  if test "x$WOLFSSL_ENABLED" = "x1"; then
++    AC_CHECK_FUNCS(wolfSSL_CTX_GenerateEchConfig,
++      ECH_SUPPORT="ECH support available via WolfSSL with wolfSSL_CTX_GenerateEchConfig"
+       ECH_ENABLED=1)
+ 
+-  dnl add 'elif' chain here for additional implementations
+   fi
+ 
+   dnl now deal with whatever we found
+@@ -4706,8 +4720,8 @@ AC_CONFIG_FILES([Makefile \
             tests/http/clients/Makefile \
             packages/Makefile \
             packages/vms/Makefile \
@@ -82,10 +145,18 @@ index 54f92d931..ea5895e9b 100644
            echo "curl was built with static libraries disabled" >&2
            exit 1
 diff --git a/include/curl/curl.h b/include/curl/curl.h
-index 944352421..532fe3acd 100644
+index 944352421..8d81e9a8d 100644
 --- a/include/curl/curl.h
 +++ b/include/curl/curl.h
-@@ -2207,6 +2207,50 @@ typedef enum {
+@@ -640,6 +640,7 @@ typedef enum {
+   CURLE_PROXY,                   /* 97 - proxy handshake error */
+   CURLE_SSL_CLIENTCERT,          /* 98 - client-side certificate required */
+   CURLE_UNRECOVERABLE_POLL,      /* 99 - poll/select returned fatal error */
++  CURLE_ECH_REQUIRED      ,      /* 100 - ECH tried but failed */
+   CURL_LAST /* never use! */
+ } CURLcode;
+ 
+@@ -2207,6 +2208,59 @@ typedef enum {
    /* Can leak things, gonna exit() soon */
    CURLOPT(CURLOPT_QUICK_EXIT, CURLOPTTYPE_LONG, 322),
  
@@ -123,15 +194,24 @@ index 944352421..532fe3acd 100644
 +
 +  /*
 +   * curl-impersonate:
-+   * Disable HTTP2 server push in the HTTP2 SETTINGS.
++   * HTTP2 settings frame keys and values, format: 1:v;2:v;3:v
 +   */
-+  CURLOPT(CURLOPT_HTTP2_NO_SERVER_PUSH, CURLOPTTYPE_LONG, 329),
++  CURLOPT(CURLOPT_HTTP2_SETTINGS, CURLOPTTYPE_STRINGPOINT, 329),
 +
 +  /* 
 +   * curl-impersonate: Whether to enable Boringssl permute extensions
 +   * See https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_set_permute_extensions.
 +   */
 +  CURLOPT(CURLOPT_SSL_PERMUTE_EXTENSIONS, CURLOPTTYPE_LONG, 330),
++
++  /*
++   * curl-impersonate:
++   * HTTP2 initial window update
++   */
++  CURLOPT(CURLOPT_HTTP2_WINDOW_UPDATE, CURLOPTTYPE_LONG, 331),
++
++  /* set ECH configuration, XXX, the official one is 324  */
++  CURLOPT(CURLOPT_ECH, CURLOPTTYPE_STRINGPOINT, 332),
 +
    CURLOPT_LASTENTRY /* the last unused */
  } CURLoption;
@@ -157,6 +237,18 @@ index 1285101c5..c620065dc 100644
  /*
   * NAME curl_easy_getinfo()
   *
+diff --git a/include/curl/typecheck-gcc.h b/include/curl/typecheck-gcc.h
+index bc8d7a78c..033c994ca 100644
+--- a/include/curl/typecheck-gcc.h
++++ b/include/curl/typecheck-gcc.h
+@@ -275,6 +275,7 @@ CURLWARNING(_curl_easy_getinfo_err_curl_off_t,
+    (option) == CURLOPT_DNS_LOCAL_IP6 ||                                       \
+    (option) == CURLOPT_DNS_SERVERS ||                                         \
+    (option) == CURLOPT_DOH_URL ||                                             \
++   (option) == CURLOPT_ECH ||                                                 \
+    (option) == CURLOPT_EGDSOCKET ||                                           \
+    (option) == CURLOPT_FTP_ACCOUNT ||                                         \
+    (option) == CURLOPT_FTP_ALTERNATIVE_TO_USER ||                             \
 diff --git a/lib/Makefile.am b/lib/Makefile.am
 index 3c0a70912..61a9eb90b 100644
 --- a/lib/Makefile.am
@@ -250,6 +342,17 @@ index f815170a7..9d9417edc 100644
    inet_ntop.c        \
    inet_pton.c        \
    krb5.c             \
+diff --git a/lib/curl_config.h.cmake b/lib/curl_config.h.cmake
+index eca71bdef..ae9f02aca 100644
+--- a/lib/curl_config.h.cmake
++++ b/lib/curl_config.h.cmake
+@@ -783,3 +783,6 @@ ${SIZEOF_TIME_T_CODE}
+ 
+ /* Define to 1 to enable websocket support. */
+ #cmakedefine USE_WEBSOCKETS 1
++
++/* if ECH support is available */
++#cmakedefine USE_ECH 1
 diff --git a/lib/dynhds.c b/lib/dynhds.c
 index b325e0060..4c8a73bab 100644
 --- a/lib/dynhds.c
@@ -302,7 +405,7 @@ index 777baa58a..2d542dfd6 100644
  /**
   * Return the n-th header entry or NULL if it does not exist.
 diff --git a/lib/easy.c b/lib/easy.c
-index d36cc03d1..65e94f1ad 100644
+index d36cc03d1..ec25400c5 100644
 --- a/lib/easy.c
 +++ b/lib/easy.c
 @@ -73,6 +73,8 @@
@@ -314,7 +417,7 @@ index d36cc03d1..65e94f1ad 100644
  
  #include "easy_lock.h"
  
-@@ -330,6 +332,134 @@ CURLsslset curl_global_sslset(curl_sslbackend id, const char *name,
+@@ -330,6 +332,146 @@ CURLsslset curl_global_sslset(curl_sslbackend id, const char *name,
    return rc;
  }
  
@@ -432,8 +535,20 @@ index d36cc03d1..65e94f1ad 100644
 +      return ret;
 +  }
 +
-+  if(opts->http2_no_server_push) {
-+    ret = curl_easy_setopt(data, CURLOPT_HTTP2_NO_SERVER_PUSH, 1L);
++  if(opts->http2_settings) {
++    ret = curl_easy_setopt(data, CURLOPT_HTTP2_SETTINGS, opts->http2_settings);
++    if(ret)
++      return ret;
++  }
++
++  if(opts->http2_window_update) {
++    ret = curl_easy_setopt(data, CURLOPT_HTTP2_WINDOW_UPDATE, opts->http2_window_update);
++    if(ret)
++      return ret;
++  }
++
++  if(opts->ech) {
++    ret = curl_easy_setopt(data, CURLOPT_ECH, opts->ech);
 +    if(ret)
 +      return ret;
 +  }
@@ -449,7 +564,7 @@ index d36cc03d1..65e94f1ad 100644
  /*
   * curl_easy_init() is the external interface to alloc, setup and init an
   * easy handle that is returned. If anything goes wrong, NULL is returned.
-@@ -338,6 +468,8 @@ struct Curl_easy *curl_easy_init(void)
+@@ -338,6 +480,8 @@ struct Curl_easy *curl_easy_init(void)
  {
    CURLcode result;
    struct Curl_easy *data;
@@ -458,7 +573,7 @@ index d36cc03d1..65e94f1ad 100644
  
    /* Make sure we inited the global SSL stuff */
    global_init_lock();
-@@ -360,6 +492,29 @@ struct Curl_easy *curl_easy_init(void)
+@@ -360,6 +504,29 @@ struct Curl_easy *curl_easy_init(void)
      return NULL;
    }
  
@@ -488,7 +603,7 @@ index d36cc03d1..65e94f1ad 100644
    return data;
  }
  
-@@ -930,6 +1085,13 @@ struct Curl_easy *curl_easy_duphandle(struct Curl_easy *data)
+@@ -930,6 +1097,13 @@ struct Curl_easy *curl_easy_duphandle(struct Curl_easy *data)
      outcurl->state.referer_alloc = TRUE;
    }
  
@@ -502,7 +617,7 @@ index d36cc03d1..65e94f1ad 100644
    /* Reinitialize an SSL engine for the new handle
     * note: the engine name has already been copied by dupset */
    if(outcurl->set.str[STRING_SSL_ENGINE]) {
-@@ -1019,6 +1181,9 @@ fail:
+@@ -1019,6 +1193,9 @@ fail:
   */
  void curl_easy_reset(struct Curl_easy *data)
  {
@@ -512,7 +627,7 @@ index d36cc03d1..65e94f1ad 100644
    Curl_free_request_state(data);
  
    /* zero out UserDefined data: */
-@@ -1043,6 +1208,23 @@ void curl_easy_reset(struct Curl_easy *data)
+@@ -1043,6 +1220,23 @@ void curl_easy_reset(struct Curl_easy *data)
  #if !defined(CURL_DISABLE_HTTP) && !defined(CURL_DISABLE_CRYPTO_AUTH)
    Curl_http_auth_cleanup_digest(data);
  #endif
@@ -537,23 +652,32 @@ index d36cc03d1..65e94f1ad 100644
  
  /*
 diff --git a/lib/easyoptions.c b/lib/easyoptions.c
-index a9c1efd00..136a43e22 100644
+index a9c1efd00..b81f3a671 100644
 --- a/lib/easyoptions.c
 +++ b/lib/easyoptions.c
-@@ -132,8 +132,12 @@ struct curl_easyoption Curl_easyopts[] = {
+@@ -86,6 +86,7 @@ struct curl_easyoption Curl_easyopts[] = {
+   {"DOH_SSL_VERIFYPEER", CURLOPT_DOH_SSL_VERIFYPEER, CURLOT_LONG, 0},
+   {"DOH_SSL_VERIFYSTATUS", CURLOPT_DOH_SSL_VERIFYSTATUS, CURLOT_LONG, 0},
+   {"DOH_URL", CURLOPT_DOH_URL, CURLOT_STRING, 0},
++  {"ECH", CURLOPT_ECH, CURLOT_STRING, 0},
+   {"EGDSOCKET", CURLOPT_EGDSOCKET, CURLOT_STRING, 0},
+   {"ENCODING", CURLOPT_ACCEPT_ENCODING, CURLOT_STRING, CURLOT_FLAG_ALIAS},
+   {"ERRORBUFFER", CURLOPT_ERRORBUFFER, CURLOT_OBJECT, 0},
+@@ -132,8 +133,13 @@ struct curl_easyoption Curl_easyopts[] = {
    {"HSTS_CTRL", CURLOPT_HSTS_CTRL, CURLOT_LONG, 0},
    {"HTTP09_ALLOWED", CURLOPT_HTTP09_ALLOWED, CURLOT_LONG, 0},
    {"HTTP200ALIASES", CURLOPT_HTTP200ALIASES, CURLOT_SLIST, 0},
 +  {"HTTP2_PSEUDO_HEADERS_ORDER", CURLOPT_HTTP2_PSEUDO_HEADERS_ORDER,
 +      CURLOT_STRING, 0},
-+  {"HTTP2_NO_SERVER_PUSH", CURLOPT_HTTP2_NO_SERVER_PUSH, CURLOT_LONG, 0},
++  {"HTTP2_SETTINGS", CURLOPT_HTTP2_SETTINGS, CURLOT_STRING, 0},
++  {"HTTP2_WINDOW_UPDATE", CURLOPT_HTTP2_WINDOW_UPDATE, CURLOT_LONG, 0},
    {"HTTPAUTH", CURLOPT_HTTPAUTH, CURLOT_VALUES, 0},
    {"HTTPGET", CURLOPT_HTTPGET, CURLOT_LONG, 0},
 +  {"HTTPBASEHEADER", CURLOPT_HTTPBASEHEADER, CURLOT_SLIST, 0},
    {"HTTPHEADER", CURLOPT_HTTPHEADER, CURLOT_SLIST, 0},
    {"HTTPPOST", CURLOPT_HTTPPOST, CURLOT_OBJECT, 0},
    {"HTTPPROXYTUNNEL", CURLOPT_HTTPPROXYTUNNEL, CURLOT_LONG, 0},
-@@ -302,18 +306,23 @@ struct curl_easyoption Curl_easyopts[] = {
+@@ -302,18 +308,23 @@ struct curl_easyoption Curl_easyopts[] = {
    {"SSLKEYTYPE", CURLOPT_SSLKEYTYPE, CURLOT_STRING, 0},
    {"SSLKEY_BLOB", CURLOPT_SSLKEY_BLOB, CURLOT_BLOB, 0},
    {"SSLVERSION", CURLOPT_SSLVERSION, CURLOT_VALUES, 0},
@@ -577,12 +701,12 @@ index a9c1efd00..136a43e22 100644
    {"STDERR", CURLOPT_STDERR, CURLOT_OBJECT, 0},
    {"STREAM_DEPENDS", CURLOPT_STREAM_DEPENDS, CURLOT_OBJECT, 0},
    {"STREAM_DEPENDS_E", CURLOPT_STREAM_DEPENDS_E, CURLOT_OBJECT, 0},
-@@ -370,6 +379,6 @@ struct curl_easyoption Curl_easyopts[] = {
+@@ -370,6 +381,6 @@ struct curl_easyoption Curl_easyopts[] = {
   */
  int Curl_easyopts_check(void)
  {
 -  return ((CURLOPT_LASTENTRY%10000) != (322 + 1));
-+  return ((CURLOPT_LASTENTRY%10000) != (330 + 1));
++  return ((CURLOPT_LASTENTRY%10000) != (332 + 1));
  }
  #endif
 diff --git a/lib/http.c b/lib/http.c
@@ -874,7 +998,7 @@ index 219dcc2c0..7b04c6c36 100644
    }
  
 diff --git a/lib/http2.c b/lib/http2.c
-index c666192fc..5ea7d04c8 100644
+index c666192fc..5a90b28ea 100644
 --- a/lib/http2.c
 +++ b/lib/http2.c
 @@ -50,6 +50,7 @@
@@ -894,7 +1018,7 @@ index c666192fc..5ea7d04c8 100644
  /* on receving from TLS, we prep for holding a full stream window */
  #define H2_NW_RECV_CHUNKS       (H2_STREAM_WINDOW_SIZE / H2_CHUNK_SIZE)
  /* on send into TLS, we just want to accumulate small frames */
-@@ -86,24 +87,48 @@
+@@ -86,24 +87,84 @@
   * will block their received QUOTA in the connection window. And if we
   * run out of space, the server is blocked from sending us any data.
   * See #10988 for an issue with this. */
@@ -906,53 +1030,114 @@ index c666192fc..5ea7d04c8 100644
 +#define H2_SETTINGS_IV_LEN  8
  #define H2_BINSETTINGS_LEN 80
  
++
  static int populate_settings(nghttp2_settings_entry *iv,
                               struct Curl_easy *data)
  {
 -  iv[0].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
 -  iv[0].value = Curl_multi_max_concurrent_streams(data->multi);
++  // curl-impersonate:
++  // Setting http2 settings frame based on user instruction.
++  // https://httpwg.org/specs/rfc7540.html#SETTINGS
++  // Format example: 1:65536;2:0;4:6291456;6:262144
++
++  // TODO check if the http2 settings is valid
 +  int i = 0;
++  char *delimiter = ";";
++
++  // Use chrome's settings as default
++  char *http2_settings = "1:65536;2:0;4:6291456;6:262144";
++  if(data->set.str[STRING_HTTP2_SETTINGS]) {
++    http2_settings = data->set.str[STRING_HTTP2_SETTINGS];
++  }
  
 -  iv[1].settings_id = NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE;
 -  iv[1].value = H2_STREAM_WINDOW_SIZE;
-+  /* curl-impersonate: Align HTTP/2 settings to Chrome's */
-+  iv[i].settings_id = NGHTTP2_SETTINGS_HEADER_TABLE_SIZE;
-+  iv[i].value = 0x10000;
-+  i++;
++  // printf("USING settings %s\n", http2_settings);
++
++  char *tmp = strdup(http2_settings);
++  char *setting = strtok(tmp, delimiter);
++
++  // loop through the string to extract all other tokens
++  while(setting != NULL) {
++    // deal with each setting
++    switch(setting[0]) {
++      case '1':
++        iv[i].settings_id = NGHTTP2_SETTINGS_HEADER_TABLE_SIZE;
++        iv[i].value = atoi(setting + 2);
++        i++;
++        break;
++      case '2':
++        iv[i].settings_id = NGHTTP2_SETTINGS_ENABLE_PUSH;
++        iv[i].value = atoi(setting + 2);
++        i++;
++        break;
++      case '3':
++        // FIXME We also need to notify curl_multi about this setting
++        iv[i].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
++        iv[i].value = atoi(setting + 2);
++        i++;
++        break;
++      case '4':
++        iv[i].settings_id = NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE;
++        iv[i].value = atoi(setting + 2);
++        i++;
++        break;
++      case '5':
++        iv[i].settings_id = NGHTTP2_SETTINGS_MAX_FRAME_SIZE;
++        iv[i].value = atoi(setting + 2);
++        i++;
++        break;
++      case '6':
++        iv[i].settings_id = NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE;
++        iv[i].value = atoi(setting + 2);
++        i++;
++        break;
++    }
++    setting = strtok(NULL, delimiter);
++  }
++  free(tmp);
  
 -  iv[2].settings_id = NGHTTP2_SETTINGS_ENABLE_PUSH;
 -  iv[2].value = data->multi->push_cb != NULL;
-+  if(data->set.http2_no_server_push) {
-+    iv[i].settings_id = NGHTTP2_SETTINGS_ENABLE_PUSH;
-+    iv[i].value = 0;
-+    i++;
-+  }
-+
-+  iv[i].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
-+  iv[i].value = Curl_multi_max_concurrent_streams(data->multi);
-+  i++;
-+
-+  iv[i].settings_id = NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE;
-+  iv[i].value = 0x600000;
-+  i++;
- 
--  return 3;
-+  iv[i].settings_id = NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE;
-+  iv[i].value = 0x40000;
-+  i++;
-+  
 +  // curl-impersonate:
 +  // Up until Chrome 98, there was a randomly chosen setting number in the
 +  // HTTP2 SETTINGS frame. This might be something similar to TLS GREASE.
 +  // However, it seems to have been removed since.
 +  // Curl_rand(data, (unsigned char *)&iv[4].settings_id, sizeof(iv[4].settings_id));
 +  // Curl_rand(data, (unsigned char *)&iv[4].value, sizeof(iv[4].value));
-+
+ 
+-  return 3;
 +  return i;
  }
  
  static size_t populate_binsettings(uint8_t *binsettings,
-@@ -1616,11 +1641,17 @@ out:
+@@ -483,8 +544,22 @@ static CURLcode cf_h2_ctx_init(struct Curl_cfilter *cf,
+     }
+   }
+ 
+-  rc = nghttp2_session_set_local_window_size(ctx->h2, NGHTTP2_FLAG_NONE, 0,
+-                                             HTTP2_HUGE_WINDOW_SIZE);
++  // curl-impersonate:
++  // Directly changing the initial window update using users' settings.
++  int current_window_size = nghttp2_session_get_local_window_size(ctx->h2);
++
++  // Use chrome's value as default
++  int window_update = 15663105;
++  if(data->set.http2_window_update) {
++    window_update = data->set.http2_window_update;
++  }
++
++  // printf("Using window update %d\n", window_update);
++
++  rc = nghttp2_session_set_local_window_size(
++      ctx->h2, NGHTTP2_FLAG_NONE, 0,
++      current_window_size + window_update);
++
+   if(rc) {
+     failf(data, "nghttp2_session_set_local_window_size() failed: %s(%d)",
+           nghttp2_strerror(rc), rc);
+@@ -1616,11 +1691,17 @@ out:
    return rv;
  }
  
@@ -971,7 +1156,7 @@ index c666192fc..5ea7d04c8 100644
  }
  
  static int sweight_in_effect(const struct Curl_easy *data)
-@@ -1642,9 +1673,11 @@ static void h2_pri_spec(struct Curl_easy *data,
+@@ -1642,9 +1723,11 @@ static void h2_pri_spec(struct Curl_easy *data,
    struct Curl_data_priority *prio = &data->set.priority;
    struct stream_ctx *depstream = H2_STREAM_CTX(prio->parent);
    int32_t depstream_id = depstream? depstream->id:0;
@@ -984,7 +1169,7 @@ index c666192fc..5ea7d04c8 100644
    data->state.priority = *prio;
  }
  
-@@ -1661,20 +1694,25 @@ static CURLcode h2_progress_egress(struct Curl_cfilter *cf,
+@@ -1661,20 +1744,25 @@ static CURLcode h2_progress_egress(struct Curl_cfilter *cf,
    struct stream_ctx *stream = H2_STREAM_CTX(data);
    int rv = 0;
  
@@ -1036,10 +1221,10 @@ index 562c05c99..b99c085d5 100644
   * Store nghttp2 version info in this buffer.
 diff --git a/lib/impersonate.c b/lib/impersonate.c
 new file mode 100644
-index 000000000..a8ea0afa5
+index 000000000..00a2ba9c3
 --- /dev/null
 +++ b/lib/impersonate.c
-@@ -0,0 +1,524 @@
+@@ -0,0 +1,745 @@
 +#include "curl_setup.h"
 +
 +#include <curl/curl.h>
@@ -1085,7 +1270,9 @@ index 000000000..a8ea0afa5
 +      "Sec-Fetch-Dest: document",
 +      "Accept-Encoding: gzip, deflate, br",
 +      "Accept-Language: en-US,en;q=0.9"
-+    }
++    },
++    .http2_settings = "1:65536;3:1000;4:6291456;6:262144",
++    .http2_window_update = 15663105
 +  },
 +  {
 +    .target = "chrome100",
@@ -1125,7 +1312,9 @@ index 000000000..a8ea0afa5
 +      "Sec-Fetch-Dest: document",
 +      "Accept-Encoding: gzip, deflate, br",
 +      "Accept-Language: en-US,en;q=0.9"
-+    }
++    },
++    .http2_settings = "1:65536;3:1000;4:6291456;6:262144",
++    .http2_window_update = 15663105
 +  },
 +  {
 +    .target = "chrome101",
@@ -1165,7 +1354,9 @@ index 000000000..a8ea0afa5
 +      "Sec-Fetch-Dest: document",
 +      "Accept-Encoding: gzip, deflate, br",
 +      "Accept-Language: en-US,en;q=0.9"
-+    }
++    },
++    .http2_settings = "1:65536;3:1000;4:6291456;6:262144",
++    .http2_window_update = 15663105
 +  },
 +  {
 +    .target = "chrome104",
@@ -1205,7 +1396,9 @@ index 000000000..a8ea0afa5
 +      "Sec-Fetch-Dest: document",
 +      "Accept-Encoding: gzip, deflate, br",
 +      "Accept-Language: en-US,en;q=0.9"
-+    }
++    },
++    .http2_settings = "1:65536;3:1000;4:6291456;6:262144",
++    .http2_window_update = 15663105
 +  },
 +  {
 +    .target = "chrome107",
@@ -1246,7 +1439,8 @@ index 000000000..a8ea0afa5
 +      "Accept-Encoding: gzip, deflate, br",
 +      "Accept-Language: en-US,en;q=0.9"
 +    },
-+    .http2_no_server_push = true
++    .http2_settings = "1:65536;2:0;3:1000;4:6291456;6:262144",
++    .http2_window_update = 15663105
 +  },
 +  {
 +      .target = "chrome110",
@@ -1288,7 +1482,8 @@ index 000000000..a8ea0afa5
 +              "Accept-Encoding: gzip, deflate, br",
 +              "Accept-Language: en-US,en;q=0.9"
 +      },
-+      .http2_no_server_push = true
++      .http2_settings = "1:65536;2:0;3:1000;4:6291456;6:262144",
++      .http2_window_update = 15663105
 +  },
 +  {
 +      .target = "chrome116",
@@ -1330,7 +1525,96 @@ index 000000000..a8ea0afa5
 +              "Accept-Encoding: gzip, deflate, br",
 +              "Accept-Language: en-US,en;q=0.9"
 +      },
-+      .http2_no_server_push = true
++      .http2_settings = "1:65536;2:0;3:1000;4:6291456;6:262144",
++      .http2_window_update = 15663105
++  },
++  {
++      .target = "chrome119",
++      .httpversion = CURL_HTTP_VERSION_2_0,
++      .ssl_version = CURL_SSLVERSION_TLSv1_2 | CURL_SSLVERSION_MAX_DEFAULT,
++      .ciphers =
++      "TLS_AES_128_GCM_SHA256,"
++      "TLS_AES_256_GCM_SHA384,"
++      "TLS_CHACHA20_POLY1305_SHA256,"
++      "ECDHE-ECDSA-AES128-GCM-SHA256,"
++      "ECDHE-RSA-AES128-GCM-SHA256,"
++      "ECDHE-ECDSA-AES256-GCM-SHA384,"
++      "ECDHE-RSA-AES256-GCM-SHA384,"
++      "ECDHE-ECDSA-CHACHA20-POLY1305,"
++      "ECDHE-RSA-CHACHA20-POLY1305,"
++      "ECDHE-RSA-AES128-SHA,"
++      "ECDHE-RSA-AES256-SHA,"
++      "AES128-GCM-SHA256,"
++      "AES256-GCM-SHA384,"
++      "AES128-SHA,"
++      "AES256-SHA",
++      .npn = false,
++      .alpn = true,
++      .alps = true,
++      .tls_permute_extensions = true,
++      .tls_session_ticket = true,
++      .cert_compression = "brotli",
++      .http_headers = {
++              "sec-ch-ua: \"Google Chrome\";v=\"119\", \"Chromium\";v=\"119\", \"Not?A_Brand\";v=\"24\"",
++              "sec-ch-ua-mobile: ?0",
++              "sec-ch-ua-platform: \"macOS\"",
++              "Upgrade-Insecure-Requests: 1",
++              "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
++              "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
++              "Sec-Fetch-Site: none",
++              "Sec-Fetch-Mode: navigate",
++              "Sec-Fetch-User: ?1",
++              "Sec-Fetch-Dest: document",
++              "Accept-Encoding: gzip, deflate, br",
++              "Accept-Language: en-US,en;q=0.9"
++      },
++      .http2_settings = "1:65536;2:0;4:6291456;6:262144",
++      .http2_window_update = 15663105,
++      .ech = "GREASE"
++  },
++  {
++      .target = "chrome120",
++      .httpversion = CURL_HTTP_VERSION_2_0,
++      .ssl_version = CURL_SSLVERSION_TLSv1_2 | CURL_SSLVERSION_MAX_DEFAULT,
++      .ciphers =
++      "TLS_AES_128_GCM_SHA256,"
++      "TLS_AES_256_GCM_SHA384,"
++      "TLS_CHACHA20_POLY1305_SHA256,"
++      "ECDHE-ECDSA-AES128-GCM-SHA256,"
++      "ECDHE-RSA-AES128-GCM-SHA256,"
++      "ECDHE-ECDSA-AES256-GCM-SHA384,"
++      "ECDHE-RSA-AES256-GCM-SHA384,"
++      "ECDHE-ECDSA-CHACHA20-POLY1305,"
++      "ECDHE-RSA-CHACHA20-POLY1305,"
++      "ECDHE-RSA-AES128-SHA,"
++      "ECDHE-RSA-AES256-SHA,"
++      "AES128-GCM-SHA256,"
++      "AES256-GCM-SHA384,"
++      "AES128-SHA,"
++      "AES256-SHA",
++      .npn = false,
++      .alpn = true,
++      .alps = true,
++      .tls_permute_extensions = true,
++      .tls_session_ticket = true,
++      .cert_compression = "brotli",
++      .http_headers = {
++              "sec-ch-ua: \"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"",
++              "sec-ch-ua-mobile: ?0",
++              "sec-ch-ua-platform: \"macOS\"",
++              "Upgrade-Insecure-Requests: 1",
++              "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
++              "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
++              "Sec-Fetch-Site: none",
++              "Sec-Fetch-Mode: navigate",
++              "Sec-Fetch-User: ?1",
++              "Sec-Fetch-Dest: document",
++              "Accept-Encoding: gzip, deflate, br",
++              "Accept-Language: en-US,en;q=0.9"
++      },
++      .http2_settings = "1:65536;2:0;4:6291456;6:262144",
++      .http2_window_update = 15663105,
++      .ech = "GREASE"
 +  },
 +  {
 +    .target = "chrome99_android",
@@ -1370,7 +1654,9 @@ index 000000000..a8ea0afa5
 +      "Sec-Fetch-Dest: document",
 +      "Accept-Encoding: gzip, deflate, br",
 +      "Accept-Language: en-US,en;q=0.9"
-+    }
++    },
++    .http2_settings = "1:65536;3:1000;4:6291456;6:262144",
++    .http2_window_update = 15663105
 +  },
 +  {
 +    .target = "edge99",
@@ -1410,7 +1696,9 @@ index 000000000..a8ea0afa5
 +      "Sec-Fetch-Dest: document",
 +      "Accept-Encoding: gzip, deflate, br",
 +      "Accept-Language: en-US,en;q=0.9"
-+    }
++    },
++    .http2_settings = "1:65536;3:1000;4:6291456;6:262144",
++    .http2_window_update = 15663105
 +  },
 +  {
 +    .target = "edge101",
@@ -1450,7 +1738,9 @@ index 000000000..a8ea0afa5
 +      "Sec-Fetch-Dest: document",
 +      "Accept-Encoding: gzip, deflate, br",
 +      "Accept-Language: en-US,en;q=0.9"
-+    }
++    },
++    .http2_settings = "1:65536;3:1000;4:6291456;6:262144",
++    .http2_window_update = 15663105
 +  },
 +  {
 +    .target = "safari15_3",
@@ -1506,6 +1796,8 @@ index 000000000..a8ea0afa5
 +        "Accept-Language: en-us",
 +        "Accept-Encoding: gzip, deflate, br"
 +    },
++    .http2_settings = "4:4194304;3:100",
++    .http2_window_update = 10485760,
 +    .http2_pseudo_headers_order = "mspa"
 +  },
 +  {
@@ -1557,6 +1849,120 @@ index 000000000..a8ea0afa5
 +        "Accept-Language: en-GB,en-US;q=0.9,en;q=0.8",
 +        "Accept-Encoding: gzip, deflate, br"
 +    },
++    .http2_settings = "4:4194304;3:100",
++    .http2_window_update = 10485760,
++    .http2_pseudo_headers_order = "mspa"
++  },
++  {
++    .target = "safari17_2_ios",
++    .httpversion = CURL_HTTP_VERSION_2_0,
++    .ssl_version = CURL_SSLVERSION_TLSv1_0 | CURL_SSLVERSION_MAX_DEFAULT,
++    .ciphers =
++      "TLS_AES_128_GCM_SHA256,"
++      "TLS_AES_256_GCM_SHA384,"
++      "TLS_CHACHA20_POLY1305_SHA256,"
++      "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,"
++      "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,"
++      "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,"
++      "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,"
++      "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,"
++      "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,"
++      "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,"
++      "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,"
++      "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,"
++      "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,"
++      "TLS_RSA_WITH_AES_256_GCM_SHA384,"
++      "TLS_RSA_WITH_AES_128_GCM_SHA256,"
++      "TLS_RSA_WITH_AES_256_CBC_SHA,"
++      "TLS_RSA_WITH_AES_128_CBC_SHA,"
++      "TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA,"
++      "TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,"
++      "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
++    .curves = "X25519:P-256:P-384:P-521",
++    .sig_hash_algs =
++      "ecdsa_secp256r1_sha256,"
++      "rsa_pss_rsae_sha256,"
++      "rsa_pkcs1_sha256,"
++      "ecdsa_secp384r1_sha384,"
++      "ecdsa_sha1,"
++      "rsa_pss_rsae_sha384,"
++      "rsa_pss_rsae_sha384,"
++      "rsa_pkcs1_sha384,"
++      "rsa_pss_rsae_sha512,"
++      "rsa_pkcs1_sha512,"
++      "rsa_pkcs1_sha1",
++    .npn = false,
++    .alpn = true,
++    .alps = false,
++    .tls_session_ticket = false,
++    .cert_compression = "zlib",
++    .http_headers = {
++        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
++        "Sec-Fetch-Site: none",
++        "Accept-Encoding: gzip, deflate, br",
++        "Sec-Fetch-Mode: navigate",
++        "User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
++        "Accept-Language: en-US,en;q=0.9",
++        "Sec-Fetch-Dest: document"
++    },
++    .http2_settings = "2:0;4:2097152;3:100",
++    .http2_window_update = 10485760,
++    .http2_pseudo_headers_order = "mspa"
++  },
++  {
++    .target = "safari17_0",
++    .httpversion = CURL_HTTP_VERSION_2_0,
++    .ssl_version = CURL_SSLVERSION_TLSv1_0 | CURL_SSLVERSION_MAX_DEFAULT,
++    .ciphers =
++      "TLS_AES_128_GCM_SHA256,"
++      "TLS_AES_256_GCM_SHA384,"
++      "TLS_CHACHA20_POLY1305_SHA256,"
++      "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,"
++      "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,"
++      "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,"
++      "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,"
++      "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,"
++      "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,"
++      "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,"
++      "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,"
++      "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,"
++      "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,"
++      "TLS_RSA_WITH_AES_256_GCM_SHA384,"
++      "TLS_RSA_WITH_AES_128_GCM_SHA256,"
++      "TLS_RSA_WITH_AES_256_CBC_SHA,"
++      "TLS_RSA_WITH_AES_128_CBC_SHA,"
++      "TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA,"
++      "TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,"
++      "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
++    .curves = "X25519:P-256:P-384:P-521",
++    .sig_hash_algs =
++      "ecdsa_secp256r1_sha256,"
++      "rsa_pss_rsae_sha256,"
++      "rsa_pkcs1_sha256,"
++      "ecdsa_secp384r1_sha384,"
++      "ecdsa_sha1,"
++      "rsa_pss_rsae_sha384,"
++      "rsa_pss_rsae_sha384,"
++      "rsa_pkcs1_sha384,"
++      "rsa_pss_rsae_sha512,"
++      "rsa_pkcs1_sha512,"
++      "rsa_pkcs1_sha1",
++    .npn = false,
++    .alpn = true,
++    .alps = false,
++    .tls_session_ticket = false,
++    .cert_compression = "zlib",
++    .http_headers = {
++        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
++        "Sec-Fetch-Site: none",
++        "Accept-Encoding: gzip, deflate, br",
++        "Sec-Fetch-Mode: navigate",
++        "user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
++        "Accept-Language: en-US,en;q=0.9",
++        "Sec-Fetch-Dest: document"
++    },
++    .http2_settings = "2:0;4:4194304;3:100",
++    .http2_window_update = 10485760,
 +    .http2_pseudo_headers_order = "mspa"
 +  },
 +  {
@@ -1566,10 +1972,10 @@ index 000000000..a8ea0afa5
 +};
 diff --git a/lib/impersonate.h b/lib/impersonate.h
 new file mode 100644
-index 000000000..c62991c5a
+index 000000000..0158d5477
 --- /dev/null
 +++ b/lib/impersonate.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,47 @@
 +#ifndef HEADER_CURL_IMPERSONATE_H
 +#define HEADER_CURL_IMPERSONATE_H
 +
@@ -1602,8 +2008,10 @@ index 000000000..c62991c5a
 +  const char *cert_compression;
 +  const char *http_headers[IMPERSONATE_MAX_HEADERS];
 +  const char *http2_pseudo_headers_order;
-+  bool http2_no_server_push;
++  const char *http2_settings;
++  int http2_window_update;
 +  bool tls_permute_extensions;
++  const char *ech;
 +  /* Other TLS options will come here in the future once they are
 +   * configurable through curl_easy_setopt() */
 +};
@@ -1630,7 +2038,7 @@ index d1d32b793..3b49a1b4c 100644
  #ifdef USE_WINSOCK
    multi->wsa_event = WSACreateEvent();
 diff --git a/lib/setopt.c b/lib/setopt.c
-index 0c3b9634d..c22591f72 100644
+index 0c3b9634d..a65c5d99e 100644
 --- a/lib/setopt.c
 +++ b/lib/setopt.c
 @@ -50,6 +50,7 @@
@@ -1693,7 +2101,7 @@ index 0c3b9634d..c22591f72 100644
  #endif
    case CURLOPT_IPRESOLVE:
      arg = va_arg(param, long);
-@@ -2953,6 +2992,22 @@ CURLcode Curl_vsetopt(struct Curl_easy *data, CURLoption option, va_list param)
+@@ -2953,6 +2992,31 @@ CURLcode Curl_vsetopt(struct Curl_easy *data, CURLoption option, va_list param)
    case CURLOPT_SSL_ENABLE_ALPN:
      data->set.ssl_enable_alpn = (0 != va_arg(param, long)) ? TRUE : FALSE;
      break;
@@ -1706,16 +2114,73 @@ index 0c3b9634d..c22591f72 100644
 +  case CURLOPT_SSL_PERMUTE_EXTENSIONS:
 +    data->set.ssl_permute_extensions = (0 != va_arg(param, long)) ? TRUE : FALSE;
 +    break;
++#ifdef USE_HTTP2
 +  case CURLOPT_HTTP2_PSEUDO_HEADERS_ORDER:
 +    result = Curl_setstropt(&data->set.str[STRING_HTTP2_PSEUDO_HEADERS_ORDER],
 +                            va_arg(param, char *));
 +    break;
-+  case CURLOPT_HTTP2_NO_SERVER_PUSH:
-+    data->set.http2_no_server_push = (0 != va_arg(param, long)) ? TRUE : FALSE;
++  case CURLOPT_HTTP2_SETTINGS:
++    result = Curl_setstropt(&data->set.str[STRING_HTTP2_SETTINGS],
++                            va_arg(param, char *));
 +    break;
++  case CURLOPT_HTTP2_WINDOW_UPDATE:
++    arg = va_arg(param, long);
++    if(arg < -1)
++      return CURLE_BAD_FUNCTION_ARGUMENT;
++    data->set.http2_window_update = arg;
++    break;
++#endif
  #ifdef USE_UNIX_SOCKETS
    case CURLOPT_UNIX_SOCKET_PATH:
      data->set.abstract_unix_socket = FALSE;
+@@ -3146,6 +3210,31 @@ CURLcode Curl_vsetopt(struct Curl_easy *data, CURLoption option, va_list param)
+     data->set.ws_raw_mode = raw;
+     break;
+   }
++#endif
++#ifdef USE_ECH
++  case CURLOPT_ECH: {
++    size_t plen = 0;
++    argptr = va_arg(param, char *);
++    if(!argptr) {
++      data->set.tls_ech = CURLECH_DISABLE;
++      result = CURLE_BAD_FUNCTION_ARGUMENT;
++      return result;
++    }
++    plen = strlen(argptr);
++    if(plen > CURL_MAX_INPUT_LENGTH) {
++      data->set.tls_ech = CURLECH_DISABLE;
++      result = CURLE_BAD_FUNCTION_ARGUMENT;
++      return result;
++    }
++    if(plen == 6 && strcasecompare(argptr, "GREASE"))
++      data->set.tls_ech = CURLECH_GREASE;
++    else {
++      data->set.tls_ech = CURLECH_DISABLE;
++      result = CURLE_BAD_FUNCTION_ARGUMENT;
++      return result;
++    }
++    break;
++  }
+ #endif
+   case CURLOPT_QUICK_EXIT:
+     data->set.quick_exit = (0 != va_arg(param, long)) ? 1L:0L;
+diff --git a/lib/strerror.c b/lib/strerror.c
+index bd9cc535c..971568792 100644
+--- a/lib/strerror.c
++++ b/lib/strerror.c
+@@ -319,6 +319,11 @@ curl_easy_strerror(CURLcode error)
+   case CURLE_UNRECOVERABLE_POLL:
+     return "Unrecoverable error in select/poll";
+ 
++#ifdef USE_ECH
++  case CURLE_ECH_REQUIRED:
++    return "ECH attempted but failed";
++#endif
++
+     /* error codes not used by current libcurl */
+   case CURLE_OBSOLETE20:
+   case CURLE_OBSOLETE24:
 diff --git a/lib/transfer.c b/lib/transfer.c
 index d2ff0c24c..56e2090b6 100644
 --- a/lib/transfer.c
@@ -1784,10 +2249,26 @@ index b37d13f8f..f1b3b5440 100644
  
      if(waitpipe)
 diff --git a/lib/urldata.h b/lib/urldata.h
-index f02e66541..d628112a0 100644
+index f02e66541..058ace33c 100644
 --- a/lib/urldata.h
 +++ b/lib/urldata.h
-@@ -277,6 +277,8 @@ struct ssl_primary_config {
+@@ -53,6 +53,15 @@
+ #define PORT_GOPHER 70
+ #define PORT_MQTT 1883
+ 
++#ifdef USE_ECH
++/* CURLECH_ defines are for the tls_ech option */
++# define CURLECH_DISABLE    0
++# define CURLECH_GREASE     1
++# define CURLECH_ENABLE     2
++# define CURLECH_HARD       3
++# define CURLECH_CLA_CFG    4
++#endif
++
+ #ifdef USE_WEBSOCKETS
+ /* CURLPROTO_GOPHERS (29) is the highest publicly used protocol bit number,
+  * the rest are internal information. If we use higher bits we only do this on
+@@ -277,6 +286,8 @@ struct ssl_primary_config {
    char *password; /* TLS password (for, e.g., SRP) */
  #endif
    char *curves;          /* list of curves to use */
@@ -1796,7 +2277,7 @@ index f02e66541..d628112a0 100644
    unsigned char ssl_options;  /* the CURLOPT_SSL_OPTIONS bitmask */
    unsigned int version_max; /* max supported version the client wants to use */
    unsigned char version;    /* what version the client wants to use */
-@@ -526,6 +528,9 @@ struct ConnectBits {
+@@ -526,6 +537,9 @@ struct ConnectBits {
    BIT(multiplex); /* connection is multiplexed */
    BIT(tcp_fastopen); /* use TCP Fast Open */
    BIT(tls_enable_alpn); /* TLS ALPN extension? */
@@ -1806,7 +2287,7 @@ index f02e66541..d628112a0 100644
  #ifndef CURL_DISABLE_DOH
    BIT(doh);
  #endif
-@@ -1395,6 +1400,19 @@ struct UrlState {
+@@ -1395,6 +1409,19 @@ struct UrlState {
    CURLcode hresult; /* used to pass return codes back from hyper callbacks */
  #endif
  
@@ -1826,17 +2307,20 @@ index f02e66541..d628112a0 100644
    /* Dynamically allocated strings, MUST be freed before this struct is
       killed. */
    struct dynamically_allocated_data {
-@@ -1563,6 +1581,9 @@ enum dupstring {
+@@ -1563,6 +1590,12 @@ enum dupstring {
    STRING_DNS_LOCAL_IP6,
    STRING_SSL_EC_CURVES,
    STRING_AWS_SIGV4, /* Parameters for V4 signature */
 +  STRING_SSL_SIG_HASH_ALGS,
 +  STRING_SSL_CERT_COMPRESSION,
 +  STRING_HTTP2_PSEUDO_HEADERS_ORDER,
++  STRING_HTTP2_SETTINGS,
++  STRING_ECH_CONFIG,            /* CURLOPT_ECH_CONFIG */
++  STRING_ECH_PUBLIC,            /* CURLOPT_ECH_PUBLIC */
  
    /* -- end of null-terminated strings -- */
  
-@@ -1857,6 +1878,9 @@ struct UserDefined {
+@@ -1857,6 +1890,9 @@ struct UserDefined {
    BIT(tcp_keepalive);  /* use TCP keepalives */
    BIT(tcp_fastopen);   /* use TCP Fast Open */
    BIT(ssl_enable_alpn);/* TLS ALPN extension? */
@@ -1846,21 +2330,22 @@ index f02e66541..d628112a0 100644
    BIT(path_as_is);     /* allow dotdots? */
    BIT(pipewait);       /* wait for multiplex status before starting a new
                            connection */
-@@ -1877,6 +1901,9 @@ struct UserDefined {
+@@ -1877,6 +1913,10 @@ struct UserDefined {
  #ifdef USE_WEBSOCKETS
    BIT(ws_raw_mode);
  #endif
-+#ifdef USE_HTTP2
-+  BIT(http2_no_server_push);    /* Disable HTTP2 server push */
++#ifdef USE_ECH
++  int tls_ech;      /* TLS ECH configuration  */
 +#endif
++  int http2_window_update;
  };
  
  struct Names {
 diff --git a/lib/vtls/openssl.c b/lib/vtls/openssl.c
-index 6543fb19a..da4882af8 100644
+index 6543fb19a..58d243f1e 100644
 --- a/lib/vtls/openssl.c
 +++ b/lib/vtls/openssl.c
-@@ -79,6 +79,14 @@
+@@ -79,6 +79,21 @@
  #include <openssl/bio.h>
  #include <openssl/buffer.h>
  #include <openssl/pkcs12.h>
@@ -1872,10 +2357,17 @@ index 6543fb19a..da4882af8 100644
 +#ifdef HAVE_BROTLI
 +#include <brotli/decode.h>
 +#endif
++
++#ifdef USE_ECH
++# ifndef OPENSSL_IS_BORINGSSL
++#  include <openssl/ech.h>
++# endif
++# include "curl_base64.h"
++#endif /* USE_ECH */
  
  #if (OPENSSL_VERSION_NUMBER >= 0x0090808fL) && !defined(OPENSSL_NO_OCSP)
  #include <openssl/ocsp.h>
-@@ -266,6 +274,113 @@
+@@ -266,6 +281,113 @@
  #define HAVE_OPENSSL_VERSION
  #endif
  
@@ -1989,7 +2481,7 @@ index 6543fb19a..da4882af8 100644
  #ifdef OPENSSL_IS_BORINGSSL
  typedef uint32_t sslerr_t;
  #else
-@@ -2583,6 +2698,151 @@ static const char *tls_rt_type(int type)
+@@ -2583,6 +2705,151 @@ static const char *tls_rt_type(int type)
    }
  }
  
@@ -2141,7 +2633,7 @@ index 6543fb19a..da4882af8 100644
  /*
   * Our callback from the SSL/TLS layers.
   */
-@@ -3536,7 +3796,14 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
+@@ -3536,7 +3803,14 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
    ctx_options = SSL_OP_ALL;
  
  #ifdef SSL_OP_NO_TICKET
@@ -2157,7 +2649,7 @@ index 6543fb19a..da4882af8 100644
  #endif
  
  #ifdef SSL_OP_NO_COMPRESSION
-@@ -3603,6 +3870,16 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
+@@ -3603,6 +3877,16 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
    }
  #endif
  
@@ -2174,7 +2666,7 @@ index 6543fb19a..da4882af8 100644
    if(ssl_cert || ssl_cert_blob || ssl_cert_type) {
      if(!result &&
         !cert_stuff(data, backend->ctx,
-@@ -3656,6 +3933,35 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
+@@ -3656,6 +3940,35 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
    }
  #endif
  
@@ -2210,7 +2702,7 @@ index 6543fb19a..da4882af8 100644
  #ifdef USE_OPENSSL_SRP
    if(ssl_config->primary.username && Curl_auth_allowed_to_host(data)) {
      char * const ssl_username = ssl_config->primary.username;
-@@ -3681,6 +3987,30 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
+@@ -3681,6 +3994,30 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
    }
  #endif
  
@@ -2241,7 +2733,7 @@ index 6543fb19a..da4882af8 100644
    /* OpenSSL always tries to verify the peer, this only says whether it should
     * fail to connect if the verification fails, or if it should continue
     * anyway. In the latter case the result of the verification is checked with
-@@ -3727,6 +4057,23 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
+@@ -3727,6 +4064,23 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
  
    SSL_set_app_data(backend->handle, cf);
  
@@ -2265,6 +2757,89 @@ index 6543fb19a..da4882af8 100644
  #if (OPENSSL_VERSION_NUMBER >= 0x0090808fL) && !defined(OPENSSL_NO_TLSEXT) && \
    !defined(OPENSSL_NO_OCSP)
    if(conn_config->verifystatus)
+@@ -3755,6 +4109,21 @@ static CURLcode ossl_connect_step1(struct Curl_cfilter *cf,
+   }
+ #endif
+ 
++#ifdef USE_ECH
++  if(data->set.tls_ech != CURLECH_DISABLE) {
++    unsigned char *ech_config = NULL;
++    size_t ech_config_len = 0;
++    int trying_ech_now = 0;
++    if(data->set.tls_ech == CURLECH_GREASE) {
++# ifdef OPENSSL_IS_BORINGSSL
++      SSL_set_enable_ech_grease(backend->handle, 1);
++# else
++      SSL_set_options(backend->handle, SSL_OP_ECH_GREASE);
++# endif
++    }
++  }
++#endif
++
+   SSL_set_app_data(backend->handle, cf);
+ 
+   if(ssl_config->primary.sessionid) {
+@@ -3946,6 +4315,60 @@ static CURLcode ossl_connect_step2(struct Curl_cfilter *cf,
+           SSL_get_version(backend->handle),
+           SSL_get_cipher(backend->handle));
+ 
++#ifdef USE_ECH
++# ifndef OPENSSL_IS_BORINGSSL
++    if(data->set.tls_ech != CURLECH_DISABLE) {
++      char *inner = NULL, *outer = NULL;
++      const char *status = NULL;
++      int rv;
++
++      rv = SSL_ech_get_status(backend->handle, &inner, &outer);
++      switch(rv) {
++      case SSL_ECH_STATUS_SUCCESS:
++        status = "Succeeded";
++        break;
++      case SSL_ECH_STATUS_GREASE_ECH:
++        status = "sent GREASE, got retry-configs";
++        break;
++      case SSL_ECH_STATUS_GREASE:
++        status = "sent GREASE";
++        break;
++      case SSL_ECH_STATUS_NOT_TRIED:
++        status = "not attempted";
++        break;
++      case SSL_ECH_STATUS_NOT_CONFIGURED:
++        status = "not configured";
++        break;
++      case SSL_ECH_STATUS_BACKEND:
++        status = "backend (unexpected)";
++        break;
++      case SSL_ECH_STATUS_FAILED:
++        status = "failed";
++        break;
++      case SSL_ECH_STATUS_BAD_CALL:
++        status = "bad call (unexpected)";
++        break;
++      case SSL_ECH_STATUS_BAD_NAME:
++        status = "bad name (unexpected)";
++        break;
++      default:
++        status = "unexpected status";
++        infof(data, "ECH: unexpected status %d",rv);
++      }
++      infof(data, "ECH: result: status is %s, inner is %s, outer is %s",
++             (status?status:"NULL"),
++             (inner?inner:"NULL"),
++             (outer?outer:"NULL"));
++      OPENSSL_free(inner);
++      OPENSSL_free(outer);
++      if(rv != SSL_ECH_STATUS_SUCCESS && data->set.tls_ech == CURLECH_HARD) {
++        infof(data, "ECH: ech-hard failed");
++        return CURLE_SSL_CONNECT_ERROR;
++      }
++   }
++# endif  /* BORING */
++#endif  /* USE_ECH */
++
+ #ifdef HAS_ALPN
+     /* Sets data and len to negotiated protocol, len is 0 if no protocol was
+      * negotiated
 diff --git a/lib/vtls/vtls.c b/lib/vtls/vtls.c
 index 32334016b..1a8a75ade 100644
 --- a/lib/vtls/vtls.c
@@ -2543,11 +3118,30 @@ index f24cb6924..30b4fdb0a 100644
  endif
  
  # if unit tests are enabled, build a static library to link them with
+diff --git a/src/tool_cfgable.c b/src/tool_cfgable.c
+index ec5698ba2..df8d5913c 100644
+--- a/src/tool_cfgable.c
++++ b/src/tool_cfgable.c
+@@ -172,6 +172,14 @@ static void free_config_fields(struct OperationConfig *config)
+   Curl_safefree(config->aws_sigv4);
+   Curl_safefree(config->proto_str);
+   Curl_safefree(config->proto_redir_str);
++#ifdef USE_ECH
++  Curl_safefree(config->ech);
++  config->ech = NULL;
++  Curl_safefree(config->ech_config);
++  config->ech_config = NULL;
++  Curl_safefree(config->ech_public);
++  config->ech_public = NULL;
++#endif
+ }
+ 
+ void config_free(struct OperationConfig *config)
 diff --git a/src/tool_cfgable.h b/src/tool_cfgable.h
-index 9a15659bc..7bf73bd3b 100644
+index 9a15659bc..d7355cfd8 100644
 --- a/src/tool_cfgable.h
 +++ b/src/tool_cfgable.h
-@@ -160,8 +160,12 @@ struct OperationConfig {
+@@ -160,8 +160,13 @@ struct OperationConfig {
    bool crlf;
    char *customrequest;
    char *ssl_ec_curves;
@@ -2556,11 +3150,12 @@ index 9a15659bc..7bf73bd3b 100644
    char *krblevel;
    char *request_target;
 +  char *http2_pseudo_headers_order;
-+  bool http2_no_server_push;
++  char *http2_settings;
++  long http2_window_update;
    long httpversion;
    bool http09_allowed;
    bool nobuffer;
-@@ -191,6 +195,7 @@ struct OperationConfig {
+@@ -191,6 +196,7 @@ struct OperationConfig {
    struct curl_slist *prequote;
    long ssl_version;
    long ssl_version_max;
@@ -2568,7 +3163,7 @@ index 9a15659bc..7bf73bd3b 100644
    long proxy_ssl_version;
    long ip_version;
    long create_file_mode; /* CURLOPT_NEW_FILE_PERMS */
-@@ -266,6 +271,8 @@ struct OperationConfig {
+@@ -266,6 +272,8 @@ struct OperationConfig {
    bool proxy_ssl_auto_client_cert; /* proxy version of ssl_auto_client_cert */
    char *oauth_bearer;             /* OAuth 2.0 bearer token */
    bool noalpn;                    /* enable/disable TLS ALPN extension */
@@ -2577,11 +3172,23 @@ index 9a15659bc..7bf73bd3b 100644
    char *unix_socket_path;         /* path to Unix domain socket */
    bool abstract_unix_socket;      /* path to an abstract Unix domain socket */
    bool falsestart;
+@@ -295,6 +303,11 @@ struct OperationConfig {
+   struct State state;             /* for create_transfer() */
+   bool rm_partial;                /* on error, remove partially written output
+                                      files */
++#ifdef USE_ECH
++  char *ech;                      /* Config set by --ech keywords */
++  char *ech_config;               /* Config set by "--ech esl:" option */
++  char *ech_public;               /* Config set by "--ech pn:" option */
++#endif
+ };
+ 
+ struct GlobalConfig {
 diff --git a/src/tool_getparam.c b/src/tool_getparam.c
-index c9810e9d4..0be823c2b 100644
+index c9810e9d4..8bcd914db 100644
 --- a/src/tool_getparam.c
 +++ b/src/tool_getparam.c
-@@ -287,6 +287,13 @@ static const struct LongShort aliases[]= {
+@@ -287,6 +287,17 @@ static const struct LongShort aliases[]= {
    {"EC", "etag-save",                ARG_FILENAME},
    {"ED", "etag-compare",             ARG_FILENAME},
    {"EE", "curves",                   ARG_STRING},
@@ -2590,12 +3197,16 @@ index c9810e9d4..0be823c2b 100644
 +  {"EI", "cert-compression",         ARG_STRING},
 +  {"EJ", "tls-session-ticket",       ARG_BOOL},
 +  {"EK", "http2-pseudo-headers-order", ARG_STRING},
-+  {"EL", "http2-no-server-push",     ARG_BOOL},
-+  {"EM", "tls-permute-extensions",     ARG_BOOL},
++  {"EL", "http2-settings",           ARG_STRING},
++  {"EM", "tls-permute-extensions",   ARG_BOOL},
++  {"EN", "http2-window-update",      ARG_STRING},
++#ifdef USE_ECH
++  {"ER", "ech",                      ARG_STRING},
++#endif
    {"f",  "fail",                     ARG_BOOL},
    {"fa", "fail-early",               ARG_BOOL},
    {"fb", "styled-output",            ARG_BOOL},
-@@ -1940,6 +1947,39 @@ ParameterError getparameter(const char *flag, /* f or -long-flag */
+@@ -1940,6 +1951,62 @@ ParameterError getparameter(const char *flag, /* f or -long-flag */
          GetStr(&config->ssl_ec_curves, nextarg);
          break;
  
@@ -2625,21 +3236,44 @@ index c9810e9d4..0be823c2b 100644
 +        break;
 +
 +      case 'L':
-+        /* --http2-no-server-push */
-+        config->http2_no_server_push = toggle;
++        /* --http2-settings */
++        GetStr(&config->http2_settings, nextarg);
 +        break;
++
 +      case 'M':
 +          /* --tls-permute-extensions */
 +          config->ssl_permute_extensions = toggle;
 +          break;
++
++      case 'N':
++        /* --http2-window-update */
++        err = str2num(&config->http2_window_update, nextarg);
++        if(err)
++          return err;
++        if(config->http2_window_update < -1)
++          return PARAM_BAD_NUMERIC;
++        break;
++
++#ifdef USE_ECH
++      case 'R':
++        if(strlen(nextarg) != 6 || !strncasecompare("GREASE", nextarg, 6)) {
++          warnf(global, "Only GREASE is supported for --ech.");
++          return PARAM_BAD_USE; /*  */
++        }
++        else {
++          /* Simple case: just a string, with a keyword */
++          GetStr(&config->ech, nextarg);
++        }
++        break;
++#endif
        default: /* unknown flag */
          return PARAM_OPTION_UNKNOWN;
        }
 diff --git a/src/tool_listhelp.c b/src/tool_listhelp.c
-index 61550de72..63ea135b3 100644
+index 61550de72..c3b99ab72 100644
 --- a/src/tool_listhelp.c
 +++ b/src/tool_listhelp.c
-@@ -108,6 +108,24 @@ const struct helptxt helptext[] = {
+@@ -108,6 +108,27 @@ const struct helptxt helptext[] = {
    {"    --curves <algorithm list>",
     "(EC) TLS key exchange algorithm(s) to request",
     CURLHELP_TLS},
@@ -2655,16 +3289,31 @@ index 61550de72..63ea135b3 100644
 +  {"    --http2-pseudo-headers-order",
 +   "Change the order of the HTTP2 pseudo headers",
 +   CURLHELP_HTTP},
-+  {"    --http2-no-server-push",
-+   "Send HTTP2 setting to disable server push",
++  {"    --http2-settings",
++   "Change the order and values of the HTTP2 settings frame, e.g. 1:65536;2:0;4:6291456;6:262144",
++   CURLHELP_HTTP},
++  {"    --http2-window-update",
++   "Change the initial value for window update",
 +   CURLHELP_HTTP},
 +  {"    --tls-permute-extensions",
-+          "Enable BoringSSL TLS extensions permutations on client hello",
-+          CURLHELP_TLS},
++   "Enable BoringSSL TLS extensions permutations on client hello",
++   CURLHELP_TLS},
    {"-d, --data <data>",
     "HTTP POST data",
     CURLHELP_IMPORTANT | CURLHELP_HTTP | CURLHELP_POST | CURLHELP_UPLOAD},
-@@ -387,6 +405,9 @@ const struct helptxt helptext[] = {
+@@ -165,6 +186,11 @@ const struct helptxt helptext[] = {
+   {"-D, --dump-header <filename>",
+    "Write the received headers to <filename>",
+    CURLHELP_HTTP | CURLHELP_FTP},
++#ifdef USE_ECH
++  {"    --ech <config>",
++   "Encrypted Client Hello controls",
++  CURLHELP_TLS},
++#endif
+   {"    --egd-file <file>",
+    "EGD socket path for random data",
+    CURLHELP_TLS},
+@@ -387,6 +413,9 @@ const struct helptxt helptext[] = {
    {"    --no-alpn",
     "Disable the ALPN TLS extension",
     CURLHELP_TLS | CURLHELP_HTTP},
@@ -2675,10 +3324,10 @@ index 61550de72..63ea135b3 100644
     "Disable buffering of the output stream",
     CURLHELP_CURL},
 diff --git a/src/tool_operate.c b/src/tool_operate.c
-index ead7dca63..dc9f435f5 100644
+index ead7dca63..c3d1aecf5 100644
 --- a/src/tool_operate.c
 +++ b/src/tool_operate.c
-@@ -1493,6 +1493,15 @@ static CURLcode single_transfer(struct GlobalConfig *global,
+@@ -1493,6 +1493,22 @@ static CURLcode single_transfer(struct GlobalConfig *global,
              return result;
            }
  
@@ -2687,14 +3336,21 @@ index ead7dca63..dc9f435f5 100644
 +                          CURLOPT_HTTP2_PSEUDO_HEADERS_ORDER,
 +                          config->http2_pseudo_headers_order);
 +
-+          if(config->http2_no_server_push)
-+            my_setopt(curl, CURLOPT_HTTP2_NO_SERVER_PUSH,
-+                      config->http2_no_server_push ? 1L : 0L);
++          if(config->http2_settings)
++            my_setopt_str(curl,
++                          CURLOPT_HTTP2_SETTINGS,
++                          config->http2_settings);
++
++          if(config->http2_window_update)
++            my_setopt(curl,
++                      CURLOPT_HTTP2_WINDOW_UPDATE,
++                      config->http2_window_update);
++
 +
          } /* (proto_http) */
  
          if(proto_ftp)
-@@ -1581,6 +1590,14 @@ static CURLcode single_transfer(struct GlobalConfig *global,
+@@ -1581,6 +1597,14 @@ static CURLcode single_transfer(struct GlobalConfig *global,
          if(config->ssl_ec_curves)
            my_setopt_str(curl, CURLOPT_SSL_EC_CURVES, config->ssl_ec_curves);
  
@@ -2709,7 +3365,7 @@ index ead7dca63..dc9f435f5 100644
          if(config->writeout)
            my_setopt_str(curl, CURLOPT_CERTINFO, 1L);
  
-@@ -1914,6 +1931,10 @@ static CURLcode single_transfer(struct GlobalConfig *global,
+@@ -1914,6 +1938,10 @@ static CURLcode single_transfer(struct GlobalConfig *global,
            my_setopt_str(curl, CURLOPT_PROXY_TLS13_CIPHERS,
                          config->proxy_cipher13_list);
  
@@ -2720,7 +3376,7 @@ index ead7dca63..dc9f435f5 100644
          /* new in libcurl 7.9.2: */
          if(config->disable_epsv)
            /* disable it */
-@@ -2123,6 +2144,14 @@ static CURLcode single_transfer(struct GlobalConfig *global,
+@@ -2123,6 +2151,14 @@ static CURLcode single_transfer(struct GlobalConfig *global,
            my_setopt(curl, CURLOPT_SSL_ENABLE_ALPN, 0L);
          }
  
@@ -2735,6 +3391,23 @@ index ead7dca63..dc9f435f5 100644
          /* new in 7.40.0, abstract support added in 7.53.0 */
          if(config->unix_socket_path) {
            if(config->abstract_unix_socket) {
+@@ -2166,6 +2202,16 @@ static CURLcode single_transfer(struct GlobalConfig *global,
+         if(config->hsts)
+           my_setopt_str(curl, CURLOPT_HSTS, config->hsts);
+ 
++#ifdef USE_ECH
++        /* only if enabled in configure */
++        if(config->ech) /* only if set (optional) */
++          my_setopt_str(curl, CURLOPT_ECH, config->ech);
++        if(config->ech_public) /* only if set (optional) */
++          my_setopt_str(curl, CURLOPT_ECH, config->ech_public);
++        if(config->ech_config) /* only if set (optional) */
++          my_setopt_str(curl, CURLOPT_ECH, config->ech_config);
++#endif
++
+         /* initialize retry vars for loop below */
+         per->retry_sleep_default = (config->retry_delay) ?
+           config->retry_delay*1000L : RETRY_SLEEP_DEFAULT; /* ms */
 diff --git a/src/tool_setopt.c b/src/tool_setopt.c
 index 0f3cc83b9..1c14e9854 100644
 --- a/src/tool_setopt.c

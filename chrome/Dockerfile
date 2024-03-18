@@ -17,7 +17,7 @@ RUN apt-get update && \
 
 # The following are needed because we are going to change some autoconf scripts,
 # both for libnghttp2 and curl.
-RUN apt-get install -y autoconf automake autotools-dev pkg-config libtool
+RUN apt-get install -y autoconf automake autotools-dev pkg-config libtool git
 
 # Dependencies for downloading and building nghttp2
 RUN apt-get install -y bzip2
@@ -39,7 +39,7 @@ RUN cd brotli-${BROTLI_VERSION} && \
 
 # BoringSSL doesn't have versions. Choose a commit that is used in a stable
 # Chromium version.
-ARG BORING_SSL_COMMIT=3a667d10e94186fd503966f5638e134fe9fb4080
+ARG BORING_SSL_COMMIT=d24a38200fef19150eef00cad35b138936c08767
 RUN curl -L https://github.com/google/boringssl/archive/${BORING_SSL_COMMIT}.zip -o boringssl.zip && \
     unzip boringssl && \
     mv boringssl-${BORING_SSL_COMMIT} boringssl
@@ -94,6 +94,8 @@ RUN cd ${CURL_VERSION} && \
                 --enable-websockets \
                 --with-nghttp2=/build/${NGHTTP2_VERSION}/installed \
                 --with-brotli=/build/brotli-${BROTLI_VERSION}/build/installed \
+                --without-zstd \
+                --enable-ech \
                 --with-openssl=/build/boringssl/build \
                 LIBS="-pthread" \
                 CFLAGS="-I/build/boringssl/build" \
@@ -121,6 +123,8 @@ RUN cd ${CURL_VERSION} && \
     ./configure --prefix=/build/install \
                 --with-nghttp2=/build/${NGHTTP2_VERSION}/installed \
                 --with-brotli=/build/brotli-${BROTLI_VERSION}/build/installed \
+                --without-zstd \
+                --enable-ech \
                 --with-openssl=/build/boringssl/build \
                 LIBS="-pthread" \
                 CFLAGS="-I/build/boringssl/build" \

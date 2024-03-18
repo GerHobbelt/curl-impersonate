@@ -17,7 +17,7 @@ RUN apt-get update && \
 
 # The following are needed because we are going to change some autoconf scripts,
 # both for libnghttp2 and curl.
-RUN apt-get install -y autoconf automake autotools-dev pkg-config libtool
+RUN apt-get install -y autoconf automake autotools-dev pkg-config libtool git
 
 # Dependencies for downloading and building nghttp2
 RUN apt-get install -y bzip2
@@ -88,6 +88,7 @@ RUN cd ${CURL_VERSION} && \
                 --enable-websockets \
                 --with-nghttp2=/build/${NGHTTP2_VERSION}/installed \
                 --with-brotli=/build/brotli-${BROTLI_VERSION}/build/installed \
+                --without-zstd \
                 --with-nss=/build/${NSS_VERSION}/dist/Release \
                 --with-nss-deprecated \
                 CFLAGS="-I/build/${NSS_VERSION}/dist/public/nss -I/build/${NSS_VERSION}/dist/Release/include/nspr" \
@@ -115,6 +116,7 @@ RUN cd ${CURL_VERSION} && \
     ./configure --prefix=/build/install \
                 --with-nghttp2=/build/${NGHTTP2_VERSION}/installed \
                 --with-brotli=/build/brotli-${BROTLI_VERSION}/build/installed \
+                --without-zstd \
                 --with-nss=/build/${NSS_VERSION}/dist/Release \
                 --with-nss-deprecated \
                 CFLAGS="-I/build/${NSS_VERSION}/dist/public/nss -I/build/${NSS_VERSION}/dist/Release/include/nspr" \

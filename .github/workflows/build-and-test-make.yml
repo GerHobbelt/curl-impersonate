@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+      - feature/*
+      - bugfix/*
     tags:
       - "v*.*.*"
   pull_request:
@@ -18,7 +20,7 @@ env:
 
 jobs:
   build-and-test-linux:
-    name: (Linux ${{ matrix.arch }}) Build curl-impersonate and run the tests
+    name: (${{ matrix.host }}) Build curl-impersonate and run the tests
     runs-on: ubuntu-latest
     env:
       CC: ${{ github.workspace }}/zigshim/cc
@@ -33,6 +35,10 @@ jobs:
             host: x86_64-linux-gnu
             capture_interface: eth0
             zigflags: -target x86_64-linux-gnu.2.17
+          - arch: x86_64
+            host: x86_64-linux-musl
+            capture_interface: eth0
+            zigflags: -target x86_64-linux-musl -fPIC
           - arch: i386
             host: i386-linux-gnu
             capture_interface: eth0
@@ -41,6 +47,10 @@ jobs:
             host: aarch64-linux-gnu
             capture_interface: eth0
             zigflags: -target aarch64-linux-gnu.2.17
+          - arch: aarch64
+            host: aarch64-linux-musl
+            capture_interface: eth0
+            zigflags: -target aarch64-linux-musl -fPIC -mno-outline-atomics
           - arch: arm
             host: arm-linux-gnueabihf
             capture_interface: eth0
@@ -92,17 +102,17 @@ jobs:
       # rebuild BoringSSL. This whole thing is a bit hacky, but necessary to
       # reduce the insanely long build times.
       - name: Cache BoringSSL source
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: boringssl.zip
-          key: ${{ runner.os }}-${{ matrix.arch }}-boring-source-${{ env.BORING_SSL_COMMIT }}
+          key: ${{ runner.os }}-${{ matrix.host }}-boring-source-${{ env.BORING_SSL_COMMIT }}
 
       - name: Cache BoringSSL build
         id: cache-boringssl
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: boringssl/build
-          key: ${{ runner.os }}-${{ matrix.arch }}-boring-build-${{ env.BORING_SSL_COMMIT }}-${{ hashFiles('chrome/patches/boringssl*.patch') }}
+          key: ${{ runner.os }}-${{ matrix.host }}-boring-build-${{ env.BORING_SSL_COMMIT }}-${{ hashFiles('chrome/patches/boringssl*.patch') }}
 
       # Trick the Makefile into skipping the BoringSSL build step
       # if it was found in the cache. See Makefile.in
@@ -120,25 +130,25 @@ jobs:
           make chrome-install
 
       - name: Prepare the tests
-        if: matrix.arch == 'x86_64'
+        if: matrix.host == 'x86_64-linux-gnu'
         run: |
           # Compile 'minicurl' which is used by the tests
           gcc -Wall -Werror -o ${{ runner.temp }}/install/bin/minicurl tests/minicurl.c `curl-config --libs`
 
       - uses: actions/setup-python@v4
-        if: matrix.arch == 'x86_64'
+        if: matrix.host == 'x86_64-linux-gnu'
         with:
           python-version: '3.10'
 
       - name: Install dependencies for the tests script
-        if: matrix.arch == 'x86_64'
+        if: matrix.host == 'x86_64-linux-gnu'
         run: |
           pip3 install -r tests/requirements.txt
 
       # For now we can only run the tests when native
       # tests run the curl-impersonate binary locally.
       - name: Run the tests
-        if: matrix.arch == 'x86_64'
+        if: matrix.host == 'x86_64-linux-gnu'
         run: |
           cd tests
           # sudo is needed for capturing packets
@@ -191,7 +201,11 @@ jobs:
           set -e
           make chrome-build
           make chrome-checkbuild
-          make chrome-install-strip
+          if [[ "${{ endsWith(matrix.host, 'musl') }}" == "true" ]]; then
+            make chrome-install
+          else
+            make chrome-install-strip
+          fi
 
       - name: Create tar release files for curl-impersonate
         run: |

@@ -92,7 +92,7 @@ There are two versions of `curl-impersonate` for technical reasons. The **chrome
 
 ### Pre-compiled binaries
 
-Pre-compiled binaries for Linux and macOS (Intel) are available at the [GitHub releases](https://github.com/yifeikong/curl-impersonate/releases) page. Before you use them you need to install nss (Firefox's TLS library) and CA certificates:
+Pre-compiled binaries for Windows, Linux and macOS are available at the [GitHub releases](https://github.com/yifeikong/curl-impersonate/releases) page. Before you use them you need to install nss (Firefox's TLS library) and CA certificates:
 
 * Ubuntu - `sudo apt install libnss3 nss-plugin-pem ca-certificates`
 * Red Hat/Fedora/CentOS - `yum install nss nss-pem ca-certificates`

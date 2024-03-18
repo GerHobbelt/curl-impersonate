@@ -99,6 +99,9 @@ Pre-compiled binaries for Windows, Linux and macOS are available at the [GitHub 
 * Archlinux - `pacman -S nss ca-certificates`
 * macOS - `brew install nss ca-certificates`
 
+Also ensure you have zlib installed on your system.
+zlib is almost always present, but on some minimal systems it might be missing.
+
 The pre-compiled binaries contain libcurl-impersonate and a statically compiled curl-impersonate for ease of use.
 
 The pre-compiled Linux binaries are built for Ubuntu systems. On other distributions if you have errors with certificate verification you may have to tell curl where to find the CA certificates. For example:
@@ -122,12 +125,12 @@ Docker images based on Alpine Linux and Debian with `curl-impersonate` compiled 
 
 ```bash
 # Firefox version, Alpine Linux
-docker pull lwthiker/curl-impersonate:0.5-ff
-docker run --rm lwthiker/curl-impersonate:0.5-ff curl_ff109 https://www.wikipedia.org
+docker pull lwthiker/curl-impersonate:0.6-ff
+docker run --rm lwthiker/curl-impersonate:0.6-ff curl_ff109 https://www.wikipedia.org
 
 # Chrome version, Alpine Linux
-docker pull lwthiker/curl-impersonate:0.5-chrome
-docker run --rm lwthiker/curl-impersonate:0.5-chrome curl_chrome110 https://www.wikipedia.org
+docker pull lwthiker/curl-impersonate:0.6-chrome
+docker run --rm lwthiker/curl-impersonate:0.6-chrome curl_chrome110 https://www.wikipedia.org
 ```
 
 ### Distro packages
@@ -136,6 +139,12 @@ AUR packages are available to Archlinux users:
 
 * Pre-compiled package: [curl-impersonate-bin](https://aur.archlinux.org/packages/curl-impersonate-bin), [libcurl-impersonate-bin](https://aur.archlinux.org/packages/libcurl-impersonate-bin).
 * Build from source code: [curl-impersonate-chrome](https://aur.archlinux.org/packages/curl-impersonate-chrome), [curl-impersonate-firefox](https://aur.archlinux.org/packages/curl-impersonate-firefox).
+
+Unofficial Homebrew receipts for Mac (Chrome only) are available [here](https://github.com/shakacode/homebrew-brew/blob/main/Formula/curl-impersonate.rb):
+```
+brew tap shakacode/brew
+brew install curl-impersonate
+```
 
 ## Advanced usage
 

@@ -1,4 +1,4 @@
-AC_INIT([curl-impersonate], [0.5.4], [lwt@lwthiker.com])
+AC_INIT([curl-impersonate], [0.6.1], [lwt@lwthiker.com])
 
 AC_CANONICAL_BUILD
 AC_CANONICAL_HOST
@@ -66,6 +66,8 @@ AC_ARG_WITH([libnssckbi],
          Relevant only for the Firefox build.])],
     [AC_SUBST([with_libnssckbi], ["$withval"])],
     [AC_SUBST([with_libnssckbi], [""])])
+
+AC_ARG_VAR([CURL_CONFIG_FLAGS], ["configuration flags to be passed down to curls 'configure'"])
 
 # BoringSSL requires cmake 3.5+, which is sometimes available under
 # "cmake3" instead of "cmake"

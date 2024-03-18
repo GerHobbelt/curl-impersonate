@@ -110,6 +110,7 @@ brew install go
 ```
 
 Clone this repository:
+
 ```
 git clone https://github.com/lwthiker/curl-impersonate.git
 cd curl-impersonate

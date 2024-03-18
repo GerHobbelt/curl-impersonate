@@ -9,7 +9,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <errno.h>
 #include <getopt.h>
 #include <stdbool.h>
@@ -21,16 +23,16 @@
 
 /* Command line options. */
 struct opts {
-    char *outfile;
+    const char *outfile;
     uint16_t local_port_start;
     uint16_t local_port_end;
     bool insecure;
     char *urls[MAX_URLS];
-    char *user_agent;
+    const char *user_agent;
     struct curl_slist *headers;
 };
 
-int parse_ports_range(char *str, uint16_t *start, uint16_t *end)
+int parse_ports_range(const char *str, uint16_t *start, uint16_t *end)
 {
     char port[32];
     char *sep;
@@ -209,7 +211,11 @@ int set_opts(CURL *curl, struct opts *opts, FILE *file)
     return 0;
 }
 
-int main(int argc, char *argv[])
+#if defined(BUILD_MONOLITHIC)
+#define main(cnt, arr)      impersonate_minicurl_main(cnt, arr)
+#endif
+
+int main(int argc, const char **argv)
 {
     struct opts opts;
     CURLcode c;
@@ -219,7 +225,7 @@ int main(int argc, char *argv[])
 
     if (parse_opts(argc, argv, &opts)) {
         fprintf(stderr, "Invalid arguments\n");
-        exit(1);
+        return 1;
     }
 
     if (opts.outfile) {
